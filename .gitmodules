@@ -1,0 +1,3 @@
+[submodule "pack/plugins/start/nord.nvim"]
+	path = pack/plugins/start/nord.nvim
+	url = https://github.com/shaunsingh/nord.nvim.git
