@@ -40,3 +40,10 @@ vim.keymap.set("n", "<leader>bd", "<Cmd>bdelete<CR>", {
   desc = "Delete buffer",
   silent = true,
 })
+
+for buffer_number = 1, 9 do
+  vim.keymap.set("n", "<leader>b" .. buffer_number, "<Cmd>buffer " .. buffer_number .. "<CR>", {
+    desc = "Go to buffer " .. buffer_number,
+    silent = true,
+  })
+end
