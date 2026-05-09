@@ -7,8 +7,10 @@ vim.opt.completeopt = { "menuone", "noselect", "popup" }
 
 vim.cmd.colorscheme("nord")
 
+local show_git_deleted_lines = false
+
 vim.api.nvim_set_hl(0, "GitAddedLine", { fg = "#a3be8c" })
-vim.api.nvim_set_hl(0, "GitModifiedLine", { fg = "#bf616a" })
+vim.api.nvim_set_hl(0, "GitModifiedLine", { fg = "#ebcb8b" })
 vim.api.nvim_set_hl(0, "GitDeletedLine", { fg = "#bf616a" })
 vim.api.nvim_set_hl(0, "FilePickerSelected", { bg = "#3b4252", fg = "#eceff4", bold = true })
 vim.api.nvim_set_hl(0, "NetrwGitUnstaged", { fg = "#ebcb8b", bold = true })
@@ -69,7 +71,6 @@ local function mark_git_changed_lines(buffer)
   end
 
   local sign_id = 1
-  local line_count = vim.api.nvim_buf_line_count(buffer)
 
   for _, line in ipairs(diff) do
     local old_start, old_count, new_start, new_count =
@@ -80,16 +81,27 @@ local function mark_git_changed_lines(buffer)
       new_start = tonumber(new_start)
       new_count = tonumber(new_count ~= "" and new_count or "1")
 
-      if new_count == 0 then
-        local mark_line = math.max(math.min(new_start, line_count), 0)
+      if show_git_deleted_lines and old_count > new_count then
+        local mark_line
+        local above_line
+
+        if new_count == 0 then
+          mark_line = math.max(math.min(new_start, vim.api.nvim_buf_line_count(buffer)), 0)
+          above_line = true
+        else
+          mark_line = math.max(math.min(new_start + new_count - 2, vim.api.nvim_buf_line_count(buffer) - 1), 0)
+          above_line = false
+        end
 
         vim.api.nvim_buf_set_extmark(buffer, git_deleted_namespace, mark_line, 0, {
           virt_lines = {
-            { { string.rep("─", 32), "GitDeletedLine" } },
+            { { "  " .. string.rep("─", 24), "GitDeletedLine" } },
           },
-          virt_lines_above = true,
+          virt_lines_above = above_line,
         })
-      else
+      end
+
+      if new_count > 0 then
         local changed_count = math.min(old_count, new_count)
 
         for offset = 0, changed_count - 1 do
