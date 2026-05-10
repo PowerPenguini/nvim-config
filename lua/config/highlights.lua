@@ -1,0 +1,13 @@
+vim.api.nvim_set_hl(0, "StatusLineMode", { fg = "#2e3440", bg = "#a3be8c", bold = true })
+vim.api.nvim_set_hl(0, "StatusLineFile", { fg = "#d8dee9", bg = "#4c566a" })
+vim.api.nvim_set_hl(0, "StatusLineInfo", { fg = "#d8dee9", bg = "#3b4252" })
+vim.api.nvim_set_hl(0, "StatusLineMuted", { fg = "#d8dee9", bg = "#4c566a" })
+vim.api.nvim_set_hl(0, "GitAddedLine", { fg = "#a3be8c" })
+vim.api.nvim_set_hl(0, "GitModifiedLine", { fg = "#ebcb8b" })
+vim.api.nvim_set_hl(0, "GitDeletedLine", { fg = "#bf616a" })
+vim.api.nvim_set_hl(0, "FilePickerSelected", { bg = "#3b4252", fg = "#eceff4", bold = true })
+vim.api.nvim_set_hl(0, "NetrwGitUnstaged", { fg = "#ebcb8b", bold = true })
+vim.api.nvim_set_hl(0, "NetrwGitStaged", { fg = "#a3be8c", bold = true })
+
+vim.fn.sign_define("GitAddedLine", { text = "▌", texthl = "GitAddedLine", numhl = "GitAddedLine" })
+vim.fn.sign_define("GitModifiedLine", { text = "▌", texthl = "GitModifiedLine", numhl = "GitModifiedLine" })
