@@ -5,6 +5,36 @@ local M = {}
 local file_picker_namespace = vim.api.nvim_create_namespace("file_picker")
 local netrw_git_namespace = vim.api.nvim_create_namespace("netrw_git_status")
 
+local netrw_winhighlight = table.concat({
+  "Normal:NetrwNormal",
+  "NormalNC:NetrwNormal",
+  "CursorLine:NetrwCursorLine",
+  "EndOfBuffer:NetrwEndOfBuffer",
+  "LineNr:NetrwLineNr",
+  "NonText:NetrwNonText",
+  "SignColumn:NetrwSignColumn",
+}, ",")
+
+local function apply_window_highlights(buffer)
+  for _, window in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_get_buf(window) == buffer then
+      vim.wo[window].winhighlight = netrw_winhighlight
+    end
+  end
+end
+
+local function sync_window_highlights(buffer)
+  for _, window in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_get_buf(window) == buffer then
+      if vim.bo[buffer].filetype == "netrw" then
+        vim.wo[window].winhighlight = netrw_winhighlight
+      elseif vim.wo[window].winhighlight == netrw_winhighlight then
+        vim.wo[window].winhighlight = ""
+      end
+    end
+  end
+end
+
 local function netrw_current_dir(buffer)
   buffer = buffer or 0
 
@@ -442,6 +472,8 @@ function M.setup()
   vim.api.nvim_create_autocmd("FileType", {
     pattern = "netrw",
     callback = function(event)
+      apply_window_highlights(event.buf)
+
       vim.keymap.set("n", "/", open_file_from_search, {
         buffer = event.buf,
         desc = "Find file by name",
@@ -453,6 +485,12 @@ function M.setup()
           mark_git_status(event.buf)
         end
       end, 50)
+    end,
+  })
+
+  vim.api.nvim_create_autocmd("BufWinEnter", {
+    callback = function(event)
+      sync_window_highlights(event.buf)
     end,
   })
 end
