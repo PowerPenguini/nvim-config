@@ -9,6 +9,7 @@ local netrw = require("config.netrw")
 
 netrw.setup()
 git.setup(netrw.refresh_git_status)
+require("config.dirdiff").setup()
 
 require("config.keymaps").setup({
   git_add_current_file = git.add_current_file,
