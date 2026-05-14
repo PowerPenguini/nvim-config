@@ -89,15 +89,15 @@ function M.mark_changed_lines(buffer)
   end
 end
 
-function M.add_current_file()
-  local file_path = vim.api.nvim_buf_get_name(0)
+function M.add_file(file_path, options)
+  options = options or {}
 
-  if file_path == "" or vim.fn.filereadable(file_path) ~= 1 then
+  if file_path == "" or (not options.allow_missing and vim.fn.filereadable(file_path) ~= 1) then
     vim.notify("Current buffer is not a file", vim.log.levels.WARN)
     return
   end
 
-  local root = util.git_root_for(vim.fs.dirname(file_path))
+  local root = options.root or util.git_root_for(vim.fs.dirname(file_path))
 
   if not root then
     vim.notify("Current file is not inside a git repo", vim.log.levels.WARN)
@@ -115,6 +115,10 @@ function M.add_current_file()
   M.mark_changed_lines(vim.api.nvim_get_current_buf())
   refresh_netrw_git_status()
   vim.notify("git add: " .. relative_file, vim.log.levels.INFO)
+end
+
+function M.add_current_file()
+  M.add_file(vim.api.nvim_buf_get_name(0))
 end
 
 function M.setup(refresh_netrw)

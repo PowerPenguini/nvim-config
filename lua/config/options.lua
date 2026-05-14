@@ -7,3 +7,4 @@ vim.opt.laststatus = 3
 vim.opt.showmode = false
 
 vim.cmd.colorscheme("nord")
+vim.cmd("syntax enable")

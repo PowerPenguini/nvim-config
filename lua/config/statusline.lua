@@ -27,9 +27,27 @@ function _G.statusline_filetype()
   return vim.bo.filetype
 end
 
+function _G.statusline_file()
+  if vim.b.dirdiff_repo_path then
+    return vim.b.dirdiff_repo_path
+  end
+
+  if vim.bo.filetype == "dirdiff" then
+    return "directory diff"
+  end
+
+  local file_name = vim.fn.expand("%:~:.")
+
+  if file_name == "" then
+    return "[No Name]"
+  end
+
+  return file_name
+end
+
 vim.opt.statusline = table.concat({
   "%#StatusLineMode# %{v:lua.statusline_mode()} ",
-  "%#StatusLineFile# %f%m%r ",
+  "%#StatusLineFile# %{v:lua.statusline_file()}%m%r ",
   "%=",
   "%#StatusLineInfo# %{&fileformat} | %{&fileencoding != '' ? &fileencoding : &encoding} | %{v:lua.statusline_filetype()} ",
   "%#StatusLineMuted# %p%% ",

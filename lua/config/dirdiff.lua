@@ -1,25 +1,42 @@
 local M = {}
 
+local git = require("config.git")
+local util = require("config.util")
+
 local file_highlights = {
   A = "GitAddedLine",
   D = "GitDeletedLine",
   M = "GitModifiedLine",
 }
 
+local staged_file_highlight = "GitStagedFile"
+local diff_sign_group = "directory_diff_changed_lines"
+
 local state = {
+  collapsed_dirs = {},
   empty_file = nil,
   first_file_line = nil,
   files = {},
+  default_guicursor = nil,
   left_dir = nil,
+  left_match = nil,
   left_win = nil,
   line_entries = {},
   list_buf = nil,
   list_win = nil,
   right_dir = nil,
+  right_match = nil,
   right_win = nil,
+  staged_files = {},
 }
 
 local namespace = vim.api.nvim_create_namespace("directory-diff")
+local cursorline_namespace = vim.api.nvim_create_namespace("directory-diff-cursorline")
+
+local add_entry_to_stage
+local current_tree_item
+local render_file_list
+local set_cursor_to_path
 
 local function is_directory(path)
   return path ~= "" and vim.fn.isdirectory(path) == 1
@@ -128,39 +145,339 @@ local function path_for_side(side, entry)
   return vim.fn.filereadable(path) == 1 and path or ensure_empty_file()
 end
 
+local function repo_path_for_entry(entry)
+  return vim.fn.getcwd() .. "/" .. entry.path
+end
+
+local function filetype_for_entry(entry)
+  return vim.filetype.match({ filename = repo_path_for_entry(entry) }) or vim.filetype.match({ filename = entry.path })
+end
+
+local function apply_entry_filetype(entry)
+  local filetype = filetype_for_entry(entry)
+
+  if not filetype or filetype == "" then
+    return
+  end
+
+  vim.bo.filetype = filetype
+  vim.bo.syntax = filetype
+end
+
+local function refresh_staged_files()
+  state.staged_files = {}
+
+  local output = util.git_output(vim.fn.getcwd(), { "diff", "--cached", "--name-only", "--diff-filter=ACDMRT" })
+
+  if not output then
+    return
+  end
+
+  for _, path in ipairs(output) do
+    state.staged_files[path] = true
+  end
+end
+
+add_entry_to_stage = function(entry)
+  git.add_file(repo_path_for_entry(entry), {
+    allow_missing = true,
+    root = vim.fn.getcwd(),
+  })
+
+  refresh_staged_files()
+
+  if state.list_buf and vim.api.nvim_buf_is_valid(state.list_buf) then
+    render_file_list()
+    set_cursor_to_path(entry.path)
+  end
+end
+
+local function path_is_inside(path, directory)
+  return path == directory or path:sub(1, #directory + 1) == directory .. "/"
+end
+
+local function entries_for_tree_item(item)
+  if not item then
+    return {}
+  end
+
+  if item.kind == "file" and item.entry then
+    return { item.entry }
+  end
+
+  if item.kind ~= "dir" and item.kind ~= "root" then
+    return {}
+  end
+
+  local entries = {}
+
+  for _, entry in ipairs(state.files) do
+    if item.kind == "root" or path_is_inside(entry.path, item.path) then
+      table.insert(entries, entry)
+    end
+  end
+
+  return entries
+end
+
+local function add_tree_item_to_stage()
+  local item = current_tree_item()
+  local entries = entries_for_tree_item(item)
+
+  if #entries == 0 then
+    return
+  end
+
+  for _, entry in ipairs(entries) do
+    git.add_file(repo_path_for_entry(entry), {
+      allow_missing = true,
+      root = vim.fn.getcwd(),
+    })
+  end
+
+  refresh_staged_files()
+
+  if state.list_buf and vim.api.nvim_buf_is_valid(state.list_buf) then
+    render_file_list()
+    set_cursor_to_path(item.path)
+  end
+end
+
+current_tree_item = function()
+  if not state.list_buf or not vim.api.nvim_buf_is_valid(state.list_buf) then
+    return nil
+  end
+
+  local line = vim.api.nvim_win_get_cursor(state.list_win)[1]
+  return state.line_entries[line]
+end
+
+local function item_entry(item)
+  if item and item.kind == "file" then
+    return item.entry
+  end
+
+  return nil
+end
+
 local function current_entry()
   if not state.list_buf or not vim.api.nvim_buf_is_valid(state.list_buf) then
     return nil
   end
 
   local line = vim.api.nvim_win_get_cursor(state.list_win)[1]
-  local entry = state.line_entries[line]
+  local entry = item_entry(state.line_entries[line])
 
   if entry then
     return entry
   end
 
   for index = line + 1, #state.line_entries do
-    if state.line_entries[index] then
-      return state.line_entries[index]
+    entry = item_entry(state.line_entries[index])
+
+    if entry then
+      return entry
     end
   end
 
   for index = line - 1, 1, -1 do
-    if state.line_entries[index] then
-      return state.line_entries[index]
+    entry = item_entry(state.line_entries[index])
+
+    if entry then
+      return entry
     end
   end
 
   return nil
 end
 
-local function edit_window(window, path)
+local function map_git_add(buffer, entry)
+  vim.keymap.set("n", "<leader>ga", function()
+    add_entry_to_stage(entry)
+  end, {
+    buffer = buffer,
+    desc = "Git add directory diff file",
+    silent = true,
+  })
+end
+
+local function edit_window(window, path, entry)
   vim.api.nvim_set_current_win(window)
   vim.cmd("edit " .. vim.fn.fnameescape(path))
+  vim.b.dirdiff_repo_path = entry.path
+  apply_entry_filetype(entry)
   vim.bo.buflisted = false
   vim.wo.diff = false
   vim.cmd.diffthis()
+  vim.wo.cursorcolumn = false
+  vim.wo.cursorline = false
+  vim.wo.winhighlight = "Cursor:DiffCursor"
+  vim.wo.signcolumn = "yes"
+  map_git_add(vim.api.nvim_get_current_buf(), entry)
+
+  return vim.api.nvim_get_current_buf()
+end
+
+local function is_diff_window(window)
+  return window
+    and (window == state.left_win or window == state.right_win)
+    and vim.api.nvim_win_is_valid(window)
+end
+
+local function diff_guicursor()
+  local guicursor = state.default_guicursor or vim.o.guicursor
+
+  if guicursor:match("n%-v%-c%-sm:") then
+    return guicursor:gsub("n%-v%-c%-sm:[^,]+", "n-v-c-sm:ver25", 1)
+  end
+
+  return "n-v-c-sm:ver25," .. guicursor
+end
+
+local function update_diff_cursor_shape()
+  if is_diff_window(vim.api.nvim_get_current_win()) then
+    vim.o.guicursor = diff_guicursor()
+  elseif state.default_guicursor then
+    vim.o.guicursor = state.default_guicursor
+  end
+end
+
+local function clear_window_cursorline(window, match_field)
+  if not window or not vim.api.nvim_win_is_valid(window) then
+    state[match_field] = nil
+    return
+  end
+
+  local buffer = vim.api.nvim_win_get_buf(window)
+  vim.api.nvim_buf_clear_namespace(buffer, cursorline_namespace, 0, -1)
+
+  if state[match_field] then
+    local match_id = state[match_field]
+    state[match_field] = nil
+
+    vim.api.nvim_win_call(window, function()
+      pcall(vim.fn.matchdelete, match_id)
+    end)
+  end
+end
+
+local function clear_diff_cursorlines()
+  clear_window_cursorline(state.left_win, "left_match")
+  clear_window_cursorline(state.right_win, "right_match")
+end
+
+local function update_active_diff_cursorline()
+  clear_diff_cursorlines()
+
+  local window = vim.api.nvim_get_current_win()
+
+  if not is_diff_window(window) then
+    update_diff_cursor_shape()
+    return
+  end
+
+  update_diff_cursor_shape()
+
+  local buffer = vim.api.nvim_win_get_buf(window)
+  local line_number = vim.api.nvim_win_get_cursor(window)[1]
+  local line = vim.api.nvim_buf_get_lines(buffer, line_number - 1, line_number, false)[1] or ""
+  local line_width = vim.fn.strdisplaywidth(line)
+  local window_width = vim.api.nvim_win_get_width(window)
+  local padding_width = math.max(window_width - line_width, 0)
+  local match_field = window == state.left_win and "left_match" or "right_match"
+
+  vim.api.nvim_win_call(window, function()
+    if #line > 0 then
+      state[match_field] = vim.fn.matchaddpos("DiffCursorLine", { { line_number, 1, #line + 1 } }, 20)
+    end
+  end)
+
+  if padding_width > 0 then
+    vim.api.nvim_buf_set_extmark(buffer, cursorline_namespace, line_number - 1, #line, {
+      virt_text = { { string.rep(" ", padding_width), "DiffCursorLine" } },
+      virt_text_pos = "inline",
+      priority = 20,
+    })
+  end
+end
+
+local function place_diff_sign(buffer, sign_id, sign_name, line_number)
+  if line_number < 1 or line_number > vim.api.nvim_buf_line_count(buffer) then
+    return sign_id
+  end
+
+  vim.fn.sign_place(sign_id, diff_sign_group, sign_name, buffer, {
+    lnum = line_number,
+    priority = 20,
+  })
+
+  return sign_id + 1
+end
+
+local function place_range_signs(buffer, sign_id, sign_name, start_line, count)
+  for offset = 0, count - 1 do
+    sign_id = place_diff_sign(buffer, sign_id, sign_name, start_line + offset)
+  end
+
+  return sign_id
+end
+
+local function mark_diff_lines(left_buffer, right_buffer, left_path, right_path)
+  vim.fn.sign_unplace(diff_sign_group, { buffer = left_buffer })
+  vim.fn.sign_unplace(diff_sign_group, { buffer = right_buffer })
+
+  local diff = vim.fn.systemlist({ "diff", "-U0", "--", left_path, right_path })
+  local left_sign_id = 1
+  local right_sign_id = 1
+
+  for _, line in ipairs(diff) do
+    local old_start, old_count, new_start, new_count =
+      line:match("^@@ %-(%d+),?(%d*) %+(%d+),?(%d*) @@")
+
+    if old_start then
+      old_start = tonumber(old_start)
+      old_count = tonumber(old_count ~= "" and old_count or "1")
+      new_start = tonumber(new_start)
+      new_count = tonumber(new_count ~= "" and new_count or "1")
+
+      if old_count == 0 then
+        right_sign_id = place_range_signs(right_buffer, right_sign_id, "GitAddedLine", new_start, new_count)
+      elseif new_count == 0 then
+        left_sign_id = place_range_signs(left_buffer, left_sign_id, "GitDeletedLine", old_start, old_count)
+      else
+        left_sign_id = place_range_signs(left_buffer, left_sign_id, "GitModifiedLine", old_start, old_count)
+        right_sign_id = place_range_signs(right_buffer, right_sign_id, "GitModifiedLine", new_start, new_count)
+      end
+    end
+  end
+end
+
+local function align_diff_folds()
+  if not state.left_win or not state.right_win then
+    return
+  end
+
+  if not vim.api.nvim_win_is_valid(state.left_win) or not vim.api.nvim_win_is_valid(state.right_win) then
+    return
+  end
+
+  for _, window in ipairs({ state.left_win, state.right_win }) do
+    vim.wo[window].foldmethod = "diff"
+    vim.wo[window].foldenable = true
+    vim.wo[window].foldlevel = 0
+  end
+
+  vim.cmd("diffupdate")
+
+  for _, window in ipairs({ state.left_win, state.right_win }) do
+    vim.api.nvim_win_call(window, function()
+      vim.cmd("normal! zM")
+    end)
+  end
+end
+
+local function ensure_diff_filler()
+  vim.opt.diffopt:append("filler")
 end
 
 local function ensure_diff_windows()
@@ -175,7 +492,43 @@ local function ensure_diff_windows()
   state.right_win = vim.api.nvim_get_current_win()
 end
 
-local function open_current_diff()
+local function enable_diff_sync()
+  if not state.left_win or not state.right_win then
+    return
+  end
+
+  if not vim.api.nvim_win_is_valid(state.left_win) or not vim.api.nvim_win_is_valid(state.right_win) then
+    return
+  end
+
+  for _, window in ipairs({ state.left_win, state.right_win }) do
+    vim.wo[window].scrollbind = true
+    vim.wo[window].cursorbind = true
+  end
+
+  local view = {
+    topline = 1,
+    lnum = 1,
+    col = 0,
+    leftcol = 0,
+  }
+
+  vim.api.nvim_win_call(state.left_win, function()
+    vim.fn.winrestview(view)
+  end)
+
+  vim.api.nvim_win_call(state.right_win, function()
+    vim.fn.winrestview(view)
+  end)
+
+  vim.api.nvim_win_call(state.left_win, function()
+    vim.cmd("syncbind")
+  end)
+
+  update_active_diff_cursorline()
+end
+
+local function open_current_diff(focus_right)
   local entry = current_entry()
 
   if not entry then
@@ -183,10 +536,22 @@ local function open_current_diff()
   end
 
   ensure_diff_windows()
+  ensure_diff_filler()
   vim.cmd("diffoff!")
-  edit_window(state.left_win, path_for_side("left", entry))
-  edit_window(state.right_win, path_for_side("right", entry))
-  vim.api.nvim_set_current_win(state.list_win)
+  local left_path = path_for_side("left", entry)
+  local right_path = path_for_side("right", entry)
+  local left_buffer = edit_window(state.left_win, left_path, entry)
+  local right_buffer = edit_window(state.right_win, right_path, entry)
+  mark_diff_lines(left_buffer, right_buffer, left_path, right_path)
+  align_diff_folds()
+  enable_diff_sync()
+
+  if focus_right then
+    vim.api.nvim_set_current_win(state.right_win)
+    update_active_diff_cursorline()
+  else
+    vim.api.nvim_set_current_win(state.list_win)
+  end
 end
 
 local function path_parts(path)
@@ -250,13 +615,48 @@ local function root_label()
   return "changes"
 end
 
-local function render_tree_node(node, depth, lines)
+local function tree_node_all_staged(node)
+  local has_files = false
+
+  for _, file in ipairs(node.files) do
+    has_files = true
+
+    if not state.staged_files[file.entry.path] then
+      return false
+    end
+  end
+
+  for _, dirname in ipairs(sorted_keys(node.dirs)) do
+    has_files = true
+
+    if not tree_node_all_staged(node.dirs[dirname]) then
+      return false
+    end
+  end
+
+  return has_files
+end
+
+local function render_tree_node(node, depth, path, lines)
   local prefix = string.rep("| ", depth)
 
   for _, dirname in ipairs(sorted_keys(node.dirs)) do
-    table.insert(lines, prefix .. dirname .. "/")
-    state.line_entries[#lines] = false
-    render_tree_node(node.dirs[dirname], depth + 1, lines)
+    local dir_path = path == "" and dirname or path .. "/" .. dirname
+    local dir_node = node.dirs[dirname]
+    local collapsed = state.collapsed_dirs[dir_path]
+    local marker = collapsed and "▸ " or "▾ "
+
+    table.insert(lines, prefix .. marker .. dirname .. "/")
+    state.line_entries[#lines] = {
+      color_start = #prefix,
+      highlight = tree_node_all_staged(dir_node) and staged_file_highlight or nil,
+      kind = "dir",
+      path = dir_path,
+    }
+
+    if not collapsed then
+      render_tree_node(dir_node, depth + 1, dir_path, lines)
+    end
   end
 
   table.sort(node.files, function(a, b)
@@ -264,28 +664,58 @@ local function render_tree_node(node, depth, lines)
   end)
 
   for _, file in ipairs(node.files) do
-    table.insert(lines, prefix .. file.entry.status .. " " .. file.name)
-    state.line_entries[#lines] = file.entry
+    local line = prefix .. file.entry.status .. " " .. file.name
+
+    table.insert(lines, line)
+    state.line_entries[#lines] = {
+      color_start = #prefix,
+      entry = file.entry,
+      kind = "file",
+      path = file.entry.path,
+    }
     state.first_file_line = state.first_file_line or #lines
   end
 end
 
-local function render_file_list()
+set_cursor_to_path = function(path)
+  if not path or not state.list_win or not vim.api.nvim_win_is_valid(state.list_win) then
+    return
+  end
+
+  for line_number, item in pairs(state.line_entries) do
+    if item and item.path == path then
+      vim.api.nvim_win_set_cursor(state.list_win, { line_number, 0 })
+      return
+    end
+  end
+end
+
+render_file_list = function()
   local lines = {}
   state.first_file_line = nil
   state.line_entries = {}
+  refresh_staged_files()
 
   if #state.files > 0 then
     table.insert(lines, "../")
-    state.line_entries[#lines] = false
+    state.line_entries[#lines] = {
+      kind = "meta",
+      path = "..",
+    }
 
     table.insert(lines, "./")
-    state.line_entries[#lines] = false
+    state.line_entries[#lines] = {
+      kind = "meta",
+      path = ".",
+    }
 
     table.insert(lines, root_label() .. "/")
-    state.line_entries[#lines] = false
+    state.line_entries[#lines] = {
+      kind = "root",
+      path = "",
+    }
 
-    render_tree_node(build_file_tree(), 1, lines)
+    render_tree_node(build_file_tree(), 1, "", lines)
   end
 
   if #lines == 0 then
@@ -300,14 +730,65 @@ local function render_file_list()
   vim.api.nvim_buf_clear_namespace(state.list_buf, namespace, 0, -1)
 
   for line_number, entry in pairs(state.line_entries) do
-    local highlight = entry and file_highlights[entry.status]
+    if entry.color_start and entry.color_start > 0 then
+      vim.api.nvim_buf_set_extmark(state.list_buf, namespace, line_number - 1, 0, {
+        end_col = entry.color_start,
+        hl_group = "DiffTreePipe",
+      })
+    end
+
+    local file_entry = item_entry(entry)
+    local highlight = file_entry and state.staged_files[file_entry.path] and staged_file_highlight
+      or file_entry and file_highlights[file_entry.status]
+      or entry.highlight
 
     if highlight then
-      vim.api.nvim_buf_set_extmark(state.list_buf, namespace, line_number - 1, 0, {
+      vim.api.nvim_buf_set_extmark(state.list_buf, namespace, line_number - 1, entry.color_start, {
         end_col = #lines[line_number],
         hl_group = highlight,
       })
     end
+  end
+end
+
+local function rerender_tree_at(path)
+  render_file_list()
+  set_cursor_to_path(path)
+end
+
+local function toggle_tree_item()
+  local item = current_tree_item()
+
+  if not item then
+    return
+  end
+
+  if item.kind == "dir" then
+    state.collapsed_dirs[item.path] = not state.collapsed_dirs[item.path]
+    rerender_tree_at(item.path)
+    return
+  end
+
+  if item.kind == "file" then
+    open_current_diff(true)
+  end
+end
+
+local function collapse_tree_item()
+  local item = current_tree_item()
+
+  if item and item.kind == "dir" and not state.collapsed_dirs[item.path] then
+    state.collapsed_dirs[item.path] = true
+    rerender_tree_at(item.path)
+  end
+end
+
+local function expand_tree_item()
+  local item = current_tree_item()
+
+  if item and item.kind == "dir" and state.collapsed_dirs[item.path] then
+    state.collapsed_dirs[item.path] = false
+    rerender_tree_at(item.path)
   end
 end
 
@@ -334,16 +815,32 @@ local function setup_file_list_window()
     vim.api.nvim_win_set_cursor(state.list_win, { state.first_file_line, 0 })
   end
 
-  vim.keymap.set("n", "<CR>", open_current_diff, {
+  vim.keymap.set("n", "<CR>", toggle_tree_item, {
     buffer = state.list_buf,
-    desc = "Open directory diff file",
+    desc = "Open directory diff file or toggle folder",
     silent = true,
   })
 
-  vim.api.nvim_create_autocmd("CursorMoved", {
+  vim.keymap.set("n", "h", collapse_tree_item, {
     buffer = state.list_buf,
-    callback = open_current_diff,
+    desc = "Collapse directory diff folder",
+    silent = true,
   })
+
+  vim.keymap.set("n", "l", expand_tree_item, {
+    buffer = state.list_buf,
+    desc = "Expand directory diff folder",
+    silent = true,
+  })
+
+  vim.keymap.set("n", "<leader>ga", function()
+    add_tree_item_to_stage()
+  end, {
+    buffer = state.list_buf,
+    desc = "Git add directory diff file",
+    silent = true,
+  })
+
 end
 
 local function maybe_start_directory_diff()
@@ -367,9 +864,23 @@ local function maybe_start_directory_diff()
 end
 
 function M.setup()
+  state.default_guicursor = vim.o.guicursor
+
   vim.api.nvim_create_autocmd("VimEnter", {
     callback = function()
       vim.schedule(maybe_start_directory_diff)
+    end,
+  })
+
+  vim.api.nvim_create_autocmd({ "CursorMoved", "WinEnter", "WinScrolled" }, {
+    callback = function()
+      update_active_diff_cursorline()
+    end,
+  })
+
+  vim.api.nvim_create_autocmd({ "WinLeave", "BufLeave" }, {
+    callback = function()
+      vim.schedule(update_diff_cursor_shape)
     end,
   })
 end
