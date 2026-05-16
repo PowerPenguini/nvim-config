@@ -1,7 +1,13 @@
 local M = {}
 
 function M.setup(actions)
-  vim.keymap.set("n", "<leader>e", actions.toggle_file_explorer, {
+  vim.keymap.set("n", "<leader>e", function()
+    if actions.toggle_diff_tree and actions.toggle_diff_tree() then
+      return
+    end
+
+    actions.toggle_file_explorer()
+  end, {
     desc = "Toggle file explorer",
     silent = true,
   })
@@ -39,6 +45,38 @@ function M.setup(actions)
 
   vim.keymap.set("n", "<leader>bd", "<Cmd>bdelete<CR>", {
     desc = "Delete buffer",
+    silent = true,
+  })
+
+  vim.keymap.set("n", "<leader><leader>", function()
+    local _, window = vim.diagnostic.open_float({
+      prefix = "  ",
+      suffix = "  ",
+      header = "  Diagnostics: ",
+      max_width = math.max(40, vim.o.columns - 8),
+    })
+    if window and vim.api.nvim_win_is_valid(window) then
+      local buffer = vim.api.nvim_win_get_buf(window)
+      vim.bo[buffer].modifiable = true
+      vim.api.nvim_buf_set_lines(buffer, 0, 0, false, { "" })
+      vim.api.nvim_buf_set_lines(buffer, -1, -1, false, { "" })
+      vim.bo[buffer].modifiable = false
+      local lines = vim.api.nvim_buf_get_lines(buffer, 0, -1, false)
+      vim.wo[window].wrap = true
+      vim.wo[window].linebreak = true
+      vim.wo[window].breakindent = false
+      vim.wo[window].showbreak = "  "
+      local height = vim.api.nvim_win_text_height(window, {
+        start_row = 0,
+        end_row = #lines - 1,
+      }).all
+      local max_height = math.max(1, vim.o.lines - 6)
+      vim.api.nvim_win_set_height(window, math.min(height, max_height))
+      vim.wo[window].winhighlight =
+        "Normal:DiagnosticFloatNormal,NormalFloat:DiagnosticFloatNormal,FloatBorder:DiagnosticFloatBorder"
+    end
+  end, {
+    desc = "Show diagnostic",
     silent = true,
   })
 

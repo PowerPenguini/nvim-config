@@ -7,17 +7,18 @@ local file_highlights = {
   A = "GitAddedLine",
   D = "GitDeletedLine",
   M = "GitModifiedLine",
+  ["?"] = "GitUntrackedFile",
 }
 
 local staged_file_highlight = "GitStagedFile"
 local diff_sign_group = "directory_diff_changed_lines"
+local file_list_width = 44
 
 local state = {
   collapsed_dirs = {},
   empty_file = nil,
   first_file_line = nil,
   files = {},
-  default_guicursor = nil,
   left_dir = nil,
   left_match = nil,
   left_win = nil,
@@ -27,6 +28,7 @@ local state = {
   right_dir = nil,
   right_match = nil,
   right_win = nil,
+  selected_tree_path = nil,
   staged_files = {},
 }
 
@@ -93,6 +95,32 @@ local function files_differ(left_path, right_path)
   return vim.v.shell_error ~= 0
 end
 
+local function is_git_difftool_dir(path)
+  return path:match("^/tmp/git%-difftool%.[^/]+/[a-z]+$") ~= nil
+end
+
+local function append_untracked_files(changes, all_files)
+  if not is_git_difftool_dir(state.left_dir or "") or not is_git_difftool_dir(state.right_dir or "") then
+    return
+  end
+
+  local output = util.git_output(vim.fn.getcwd(), { "ls-files", "--others", "--exclude-standard" })
+
+  if not output then
+    return
+  end
+
+  for _, path in ipairs(output) do
+    if path ~= "" and not all_files[path] then
+      table.insert(changes, {
+        path = path,
+        status = "?",
+        working_tree_only = true,
+      })
+    end
+  end
+end
+
 local function changed_files(left_dir, right_dir)
   local left_files = scan_files(left_dir)
   local right_files = scan_files(right_dir)
@@ -128,6 +156,8 @@ local function changed_files(left_dir, right_dir)
     end
   end
 
+  append_untracked_files(changes, all_files)
+
   table.sort(changes, function(a, b)
     return a.path < b.path
   end)
@@ -138,6 +168,11 @@ end
 local function path_for_side(side, entry)
   if side == "left" then
     local path = state.left_dir .. "/" .. entry.path
+    return vim.fn.filereadable(path) == 1 and path or ensure_empty_file()
+  end
+
+  if entry.working_tree_only then
+    local path = vim.fn.getcwd() .. "/" .. entry.path
     return vim.fn.filereadable(path) == 1 and path or ensure_empty_file()
   end
 
@@ -183,6 +218,10 @@ add_entry_to_stage = function(entry)
     allow_missing = true,
     root = vim.fn.getcwd(),
   })
+
+  if entry.working_tree_only then
+    entry.status = "A"
+  end
 
   refresh_staged_files()
 
@@ -233,6 +272,10 @@ local function add_tree_item_to_stage()
       allow_missing = true,
       root = vim.fn.getcwd(),
     })
+
+    if entry.working_tree_only then
+      entry.status = "A"
+    end
   end
 
   refresh_staged_files()
@@ -244,7 +287,12 @@ local function add_tree_item_to_stage()
 end
 
 current_tree_item = function()
-  if not state.list_buf or not vim.api.nvim_buf_is_valid(state.list_buf) then
+  if
+    not state.list_win
+    or not vim.api.nvim_win_is_valid(state.list_win)
+    or not state.list_buf
+    or not vim.api.nvim_buf_is_valid(state.list_buf)
+  then
     return nil
   end
 
@@ -261,7 +309,12 @@ local function item_entry(item)
 end
 
 local function current_entry()
-  if not state.list_buf or not vim.api.nvim_buf_is_valid(state.list_buf) then
+  if
+    not state.list_win
+    or not vim.api.nvim_win_is_valid(state.list_win)
+    or not state.list_buf
+    or not vim.api.nvim_buf_is_valid(state.list_buf)
+  then
     return nil
   end
 
@@ -301,10 +354,11 @@ local function map_git_add(buffer, entry)
   })
 end
 
-local function edit_window(window, path, entry)
+local function edit_window(window, path, entry, side)
   vim.api.nvim_set_current_win(window)
   vim.cmd("edit " .. vim.fn.fnameescape(path))
   vim.b.dirdiff_repo_path = entry.path
+  vim.b.dirdiff_side = side
   apply_entry_filetype(entry)
   vim.bo.buflisted = false
   vim.wo.diff = false
@@ -322,24 +376,6 @@ local function is_diff_window(window)
   return window
     and (window == state.left_win or window == state.right_win)
     and vim.api.nvim_win_is_valid(window)
-end
-
-local function diff_guicursor()
-  local guicursor = state.default_guicursor or vim.o.guicursor
-
-  if guicursor:match("n%-v%-c%-sm:") then
-    return guicursor:gsub("n%-v%-c%-sm:[^,]+", "n-v-c-sm:ver25", 1)
-  end
-
-  return "n-v-c-sm:ver25," .. guicursor
-end
-
-local function update_diff_cursor_shape()
-  if is_diff_window(vim.api.nvim_get_current_win()) then
-    vim.o.guicursor = diff_guicursor()
-  elseif state.default_guicursor then
-    vim.o.guicursor = state.default_guicursor
-  end
 end
 
 local function clear_window_cursorline(window, match_field)
@@ -372,11 +408,8 @@ local function update_active_diff_cursorline()
   local window = vim.api.nvim_get_current_win()
 
   if not is_diff_window(window) then
-    update_diff_cursor_shape()
     return
   end
-
-  update_diff_cursor_shape()
 
   local buffer = vim.api.nvim_win_get_buf(window)
   local line_number = vim.api.nvim_win_get_cursor(window)[1]
@@ -540,8 +573,8 @@ local function open_current_diff(focus_right)
   vim.cmd("diffoff!")
   local left_path = path_for_side("left", entry)
   local right_path = path_for_side("right", entry)
-  local left_buffer = edit_window(state.left_win, left_path, entry)
-  local right_buffer = edit_window(state.right_win, right_path, entry)
+  local left_buffer = edit_window(state.left_win, left_path, entry, "left")
+  local right_buffer = edit_window(state.right_win, right_path, entry, "right")
   mark_diff_lines(left_buffer, right_buffer, left_path, right_path)
   align_diff_folds()
   enable_diff_sync()
@@ -792,29 +825,7 @@ local function expand_tree_item()
   end
 end
 
-local function setup_file_list_window()
-  vim.cmd("only!")
-
-  state.list_win = vim.api.nvim_get_current_win()
-  state.list_buf = vim.api.nvim_create_buf(false, true)
-
-  vim.api.nvim_win_set_buf(state.list_win, state.list_buf)
-  vim.api.nvim_win_set_width(state.list_win, 44)
-
-  vim.bo[state.list_buf].bufhidden = "wipe"
-  vim.bo[state.list_buf].buftype = "nofile"
-  vim.bo[state.list_buf].filetype = "dirdiff"
-  vim.bo[state.list_buf].modifiable = false
-  vim.bo[state.list_buf].swapfile = false
-  vim.wo[state.list_win].winhighlight = "Normal:NetrwNormal,CursorLine:NetrwCursorLine,EndOfBuffer:NetrwEndOfBuffer"
-  vim.wo[state.list_win].cursorline = true
-
-  render_file_list()
-
-  if state.first_file_line then
-    vim.api.nvim_win_set_cursor(state.list_win, { state.first_file_line, 0 })
-  end
-
+local function map_file_list_keys()
   vim.keymap.set("n", "<CR>", toggle_tree_item, {
     buffer = state.list_buf,
     desc = "Open directory diff file or toggle folder",
@@ -840,7 +851,32 @@ local function setup_file_list_window()
     desc = "Git add directory diff file",
     silent = true,
   })
+end
 
+local function setup_file_list_window()
+  vim.cmd("only!")
+
+  state.list_win = vim.api.nvim_get_current_win()
+  state.list_buf = vim.api.nvim_create_buf(false, true)
+
+  vim.api.nvim_win_set_buf(state.list_win, state.list_buf)
+  vim.api.nvim_win_set_width(state.list_win, file_list_width)
+
+  vim.bo[state.list_buf].bufhidden = "hide"
+  vim.bo[state.list_buf].buftype = "nofile"
+  vim.bo[state.list_buf].filetype = "dirdiff"
+  vim.bo[state.list_buf].modifiable = false
+  vim.bo[state.list_buf].swapfile = false
+  vim.wo[state.list_win].winhighlight = "Normal:NetrwNormal,CursorLine:NetrwCursorLine,EndOfBuffer:NetrwEndOfBuffer"
+  vim.wo[state.list_win].cursorline = true
+
+  render_file_list()
+
+  if state.first_file_line then
+    vim.api.nvim_win_set_cursor(state.list_win, { state.first_file_line, 0 })
+  end
+
+  map_file_list_keys()
 end
 
 local function maybe_start_directory_diff()
@@ -863,9 +899,98 @@ local function maybe_start_directory_diff()
   open_current_diff()
 end
 
-function M.setup()
-  state.default_guicursor = vim.o.guicursor
+local function diff_session_active()
+  return state.left_dir ~= nil and state.right_dir ~= nil
+end
 
+local function list_window_visible()
+  return state.list_win and vim.api.nvim_win_is_valid(state.list_win)
+end
+
+local function focus_tree()
+  if not state.list_win or not vim.api.nvim_win_is_valid(state.list_win) then
+    return false
+  end
+
+  vim.api.nvim_set_current_win(state.list_win)
+  return true
+end
+
+local function show_tree()
+  if list_window_visible() then
+    return focus_tree()
+  end
+
+  if not diff_session_active() then
+    return false
+  end
+
+  if not state.list_buf or not vim.api.nvim_buf_is_valid(state.list_buf) then
+    state.list_buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[state.list_buf].bufhidden = "hide"
+    vim.bo[state.list_buf].buftype = "nofile"
+    vim.bo[state.list_buf].filetype = "dirdiff"
+    vim.bo[state.list_buf].modifiable = false
+    vim.bo[state.list_buf].swapfile = false
+    render_file_list()
+    map_file_list_keys()
+  end
+
+  vim.cmd("topleft vertical " .. file_list_width .. "new")
+  state.list_win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(state.list_win, state.list_buf)
+  vim.api.nvim_win_set_width(state.list_win, file_list_width)
+  vim.wo[state.list_win].winhighlight = "Normal:NetrwNormal,CursorLine:NetrwCursorLine,EndOfBuffer:NetrwEndOfBuffer"
+  vim.wo[state.list_win].cursorline = true
+
+  if state.selected_tree_path then
+    set_cursor_to_path(state.selected_tree_path)
+  elseif state.first_file_line then
+    vim.api.nvim_win_set_cursor(state.list_win, { state.first_file_line, 0 })
+  end
+
+  return true
+end
+
+local function hide_tree()
+  if not list_window_visible() then
+    return false
+  end
+
+  local item = current_tree_item()
+  state.selected_tree_path = item and item.path or state.selected_tree_path
+
+  local next_window = state.right_win and vim.api.nvim_win_is_valid(state.right_win) and state.right_win
+    or state.left_win and vim.api.nvim_win_is_valid(state.left_win) and state.left_win
+    or nil
+
+  vim.api.nvim_win_close(state.list_win, true)
+  state.list_win = nil
+
+  if next_window and vim.api.nvim_win_is_valid(next_window) then
+    vim.api.nvim_set_current_win(next_window)
+  end
+
+  return true
+end
+
+function M.toggle_tree()
+  if not diff_session_active() then
+    return false
+  end
+
+  if not list_window_visible() then
+    return show_tree()
+  end
+
+  if vim.api.nvim_get_current_win() == state.list_win then
+    return hide_tree()
+  end
+
+  return focus_tree()
+end
+
+function M.setup()
   vim.api.nvim_create_autocmd("VimEnter", {
     callback = function()
       vim.schedule(maybe_start_directory_diff)
@@ -875,12 +1000,6 @@ function M.setup()
   vim.api.nvim_create_autocmd({ "CursorMoved", "WinEnter", "WinScrolled" }, {
     callback = function()
       update_active_diff_cursorline()
-    end,
-  })
-
-  vim.api.nvim_create_autocmd({ "WinLeave", "BufLeave" }, {
-    callback = function()
-      vim.schedule(update_diff_cursor_shape)
     end,
   })
 end
