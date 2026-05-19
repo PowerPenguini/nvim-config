@@ -41,6 +41,8 @@ vim.api.nvim_set_hl(0, "DiffCursorLine", {
   underdouble = false,
 })
 vim.api.nvim_set_hl(0, "DiffCursor", { fg = "#eceff4", bg = "#3b4252" })
+vim.api.nvim_set_hl(0, "FilePickerNormal", { fg = "#d8dee9", bg = "#242933" })
+vim.api.nvim_set_hl(0, "FilePickerBorder", { fg = "#4c566a", bg = "#242933" })
 vim.api.nvim_set_hl(0, "FilePickerSelected", { bg = "#3b4252", fg = "#eceff4", bold = true })
 vim.api.nvim_set_hl(0, "NetrwGitUnstaged", { fg = "#ebcb8b", bold = true })
 vim.api.nvim_set_hl(0, "NetrwGitStaged", { fg = "#a3be8c", bold = true })

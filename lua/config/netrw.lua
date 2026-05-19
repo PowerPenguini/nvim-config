@@ -16,6 +16,15 @@ local netrw_winhighlight = table.concat({
   "SignColumn:NetrwSignColumn",
 }, ",")
 
+local file_picker_winhighlight = table.concat({
+  "Normal:FilePickerNormal",
+  "NormalFloat:FilePickerNormal",
+  "FloatBorder:FilePickerBorder",
+  "FloatTitle:FilePickerBorder",
+  "EndOfBuffer:FilePickerNormal",
+  "NonText:FilePickerNormal",
+}, ",")
+
 local function apply_window_highlights(buffer)
   for _, window in ipairs(vim.api.nvim_list_wins()) do
     if vim.api.nvim_win_get_buf(window) == buffer then
@@ -408,6 +417,7 @@ local function open_file_from_search()
     title = " Find file ",
     style = "minimal",
   })
+  vim.wo[prompt_win].winhighlight = file_picker_winhighlight
 
   result_win = vim.api.nvim_open_win(result_buf, false, {
     relative = "editor",
@@ -418,6 +428,7 @@ local function open_file_from_search()
     border = "single",
     style = "minimal",
   })
+  vim.wo[result_win].winhighlight = file_picker_winhighlight
 
   vim.bo[prompt_buf].buftype = "prompt"
   vim.fn.prompt_setprompt(prompt_buf, "")
@@ -539,6 +550,7 @@ local function open_text_from_search()
   local gutter_width = preview_width > 0 and 2 or 0
   local result_width = width - preview_width - gutter_width
   local result_height = math.min(max_results, math.max(5, lines - 8))
+  local preview_height = preview_width > 0 and result_height + 3 or 0
   local row = math.max(1, math.floor((lines - result_height - 3) / 3))
   local col = math.max(0, math.floor((columns - width) / 2))
   local prompt_buf = vim.api.nvim_create_buf(false, true)
@@ -618,7 +630,7 @@ local function open_text_from_search()
       return
     end
 
-    local display, highlighted_row = read_preview_lines(root, match, result_height)
+    local display, highlighted_row = read_preview_lines(root, match, preview_height)
 
     vim.api.nvim_buf_set_lines(preview_buf, 0, -1, false, display)
     vim.api.nvim_buf_clear_namespace(preview_buf, text_preview_namespace, 0, -1)
@@ -885,12 +897,13 @@ local function open_text_from_search()
     relative = "editor",
     row = row,
     col = col,
-    width = width,
+    width = result_width,
     height = 1,
     border = "single",
     title = " Grep text ",
     style = "minimal",
   })
+  vim.wo[prompt_win].winhighlight = file_picker_winhighlight
 
   result_win = vim.api.nvim_open_win(result_buf, false, {
     relative = "editor",
@@ -901,18 +914,20 @@ local function open_text_from_search()
     border = "single",
     style = "minimal",
   })
+  vim.wo[result_win].winhighlight = file_picker_winhighlight
 
   if preview_buf then
     preview_win = vim.api.nvim_open_win(preview_buf, false, {
       relative = "editor",
-      row = row + 3,
+      row = row,
       col = col + result_width + gutter_width,
       width = preview_width,
-      height = result_height,
+      height = preview_height,
       border = "single",
       title = " Preview ",
       style = "minimal",
     })
+    vim.wo[preview_win].winhighlight = file_picker_winhighlight
   end
 
   vim.bo[prompt_buf].buftype = "prompt"
